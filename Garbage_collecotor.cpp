@@ -1,3 +1,110 @@
+/*
+Create Garbage_collecotor.cpp
+1) Problem Statement
+We have a system that periodically creates snapshots (files/blobs/metadata) of some dataset/state. Over time, old snapshots consume storage. We need a Snapshot GC that:
+
+Selects snapshots eligible for deletion (based on retention + references).
+Deletes them safely (no data loss, no deleting active/needed snapshots).
+Handles failures (disk corruption, partial deletes, retries, audit trail). [Handling S...t Failures | Word]
+
+
+2) Key Requirements (Design)
+Functional
+
+Retention policy:
+
+Keep last N snapshots, or keep snapshots newer than T days.
+Optionally keep daily/weekly/monthly “checkpoints”.
+
+
+Reference protection:
+
+A snapshot cannot be deleted if it is referenced by:
+
+restore points / tags (e.g., “release”, “prod-pin”)
+active readers/leases
+replication or incremental chains (parent dependency)
+
+
+
+
+Atomicity & safety:
+
+Two‑phase delete: mark then sweep (delete).
+Detect and avoid deleting snapshots currently in use.
+
+
+
+Non‑Functional
+
+Crash-safe: if process restarts, it should resume without corruption.
+Observable: metrics, logs, audit records of deletions.
+Scalable: handle millions of snapshots with pagination.
+Configurable: policy changes without code changes.
+
+
+3) Data Model
+Snapshot metadata (stored in a persistent “Snapshot Catalog”)
+
+snapshotId (string/uuid)
+createdTime (timestamp)
+sizeBytes
+state ∈ {Active, MarkedForDeletion, Deleting, Deleted}
+parentId (optional)  // for incremental chains
+tags (set)   // pins like “keep”, “release”
+refCount or leases // active references/leases count
+lastAccessTime (optional)
+
+Catalog interface
+
+list snapshots by time / state
+get snapshot by id
+set state transitions
+add/remove tags or leases
+record deletion events
+
+
+4) GC Algorithm (Mark–Sweep for Snapshots)
+MARK phase
+Compute “live set”:
+
+Snapshots that must be kept:
+
+Newer than retention cutoff
+In the latest N
+Tagged/pinned (e.g., “keep”, “release”)
+Have active leases/refcount > 0
+Are parents of a live snapshot (dependency closure)
+
+
+
+Everything else becomes candidate.
+SWEEP phase
+For candidates:
+
+Transition Active → MarkedForDeletion
+After a grace period (optional), transition MarkedForDeletion → Deleting
+Delete underlying storage objects
+Transition Deleting → Deleted
+On failure: record error + backoff + retry; possibly quarantine.
+
+This two-stage approach is also friendly for “remembering failures across restarts” as highlighted in the snapshot failure doc. [Handling S...t Failures | Word]
+
+5) Concurrency & Safety
+
+Leases: readers take a lease on snapshotId; GC refuses to delete if lease exists.
+Locking: use catalog-level optimistic concurrency (etag/version) per snapshot record.
+Rate limiting: delete at bounded throughput to avoid IO storms.
+Verification: optionally “scrub” metadata/store to detect corruption early. [Handling S...t Failures | Word]
+
+
+6) C++ Skeleton Design (Clean Interfaces)
+
+This is intentionally “design-program style”: interfaces + core logic.
+You can plug in your storage (local FS/Azure blob/etc.) and DB (SQLite/Cosmos/etc.).
+
+*/
+
 #include <chrono>
 #include <cstdint>
 #include <optional>
